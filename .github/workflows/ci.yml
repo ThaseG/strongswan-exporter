@@ -12,15 +12,16 @@ jobs:
     runs-on: self-hosted
     steps:
 
-    - name: Clean workspace
+    - name: Clean workspace completely
       run: |
-        sudo rm -rf ${{ github.workspace }}/* || true
-        sudo rm -rf ${{ github.workspace }}/.git || true
-        sudo rm -rf ${{ github.workspace }}/.github || true
+        cd /home/git-runner/strongswan-exporter/actions-runner/_work/strongswan-exporter
+        sudo rm -rf strongswan-exporter
+        mkdir -p strongswan-exporter
 
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        clean: false  # Disable Git's own cleanup since we handle it
     
     - uses: actions/setup-go@v5
       with:
@@ -59,13 +60,15 @@ jobs:
     runs-on: self-hosted
 
     steps:
-    - name: Clean workspace
+    - name: Clean workspace completely
       run: |
-        sudo rm -rf ${{ github.workspace }}/* || true
-        sudo rm -rf ${{ github.workspace }}/.git || true
-        sudo rm -rf ${{ github.workspace }}/.github || true
+        cd /home/git-runner/strongswan-exporter/actions-runner/_work/strongswan-exporter
+        sudo rm -rf strongswan-exporter
+        mkdir -p strongswan-exporter
 
     - uses: actions/checkout@v4
+      with:
+        clean: false
     
     - name: Run Trivy vulnerability scanner
       run: |
