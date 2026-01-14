@@ -28,7 +28,7 @@ type Session struct {
 func getSessionsJSON(config *Config) ([]byte, error) {
 	sessions, err := getSessions(config)
 	if err != nil {
-		return nil, err
+		sessions = []Session{}
 	}
 
 	return json.Marshal(sessions)
@@ -37,19 +37,17 @@ func getSessionsJSON(config *Config) ([]byte, error) {
 func getSessions(config *Config) ([]Session, error) {
 	session, err := vici.NewSession()
 	if err != nil {
-		return nil, fmt.Errorf("error connecting to StrongSwan: %w", err)
+		return []Session{}, fmt.Errorf("error connecting to StrongSwan: %w", err)
 	}
 	defer session.Close()
 
 	var sessions []Session
 
-	// Get hostname
 	hostname := "strongswan-server"
 
-	// List all active SAs
 	sasMsg, err := session.StreamedCommandRequest("list-sas", "list-sa", nil)
 	if err != nil {
-		return nil, fmt.Errorf("error listing SAs: %w", err)
+		return []Session{}, fmt.Errorf("error listing SAs: %w", err)
 	}
 
 	messages := sasMsg.Messages()
@@ -61,7 +59,6 @@ func getSessions(config *Config) ([]Session, error) {
 				continue
 			}
 
-			// Extract SA information
 			uniqueID := saName
 			state := "UNKNOWN"
 			if st, ok := saData["state"].(string); ok {
@@ -72,7 +69,6 @@ func getSessions(config *Config) ([]Session, error) {
 			remotePort := ""
 			if remoteHostFull, ok := saData["remote-host"].(string); ok {
 				remoteHost = remoteHostFull
-				// Try to extract port if present (format: IP:port)
 				if idx := len(remoteHostFull) - 1; idx > 0 {
 					for i := len(remoteHostFull) - 1; i >= 0; i-- {
 						if remoteHostFull[i] == ':' {
@@ -91,19 +87,16 @@ func getSessions(config *Config) ([]Session, error) {
 
 			established := ""
 			if estTime, ok := saData["established"].(string); ok {
-				// Parse Unix timestamp
 				if ts, err := parseTimestamp(estTime); err == nil {
 					established = ts.Format("2006-01-02 15:04:05")
 				}
 			}
 
-			// Get protocol from IKE version
 			protocol := "ikev2"
 			if version, ok := saData["version"].(string); ok {
 				protocol = version
 			}
 
-			// Process child SAs for traffic statistics and virtual IPs
 			if childSAs, ok := saData["child-sas"].(map[string]interface{}); ok {
 				for _, childData := range childSAs {
 					if child, ok := childData.(map[string]interface{}); ok {
@@ -118,7 +111,6 @@ func getSessions(config *Config) ([]Session, error) {
 							Established: established,
 						}
 
-						// Get traffic selectors for virtual IPs
 						if remoteTSData, ok := child["remote-ts"].([]interface{}); ok && len(remoteTSData) > 0 {
 							if ts, ok := remoteTSData[0].(string); ok {
 								sess.RemoteTS = ts
@@ -131,7 +123,6 @@ func getSessions(config *Config) ([]Session, error) {
 							}
 						}
 
-						// Get byte/packet counters
 						if bytesIn, ok := child["bytes-in"].(string); ok {
 							sess.BytesIn = bytesIn
 						}

@@ -11,7 +11,6 @@ import (
 type StrongSwanCollector struct {
 	config *Config
 
-	// Metrics
 	up            *prometheus.Desc
 	info          *prometheus.Desc
 	sessionsTotal *prometheus.Desc
@@ -64,37 +63,39 @@ func (c *StrongSwanCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *StrongSwanCollector) Collect(ch chan<- prometheus.Metric) {
-	// Connect to StrongSwan via VICI
 	session, err := vici.NewSession()
 	if err != nil {
 		log.Printf("Error connecting to StrongSwan VICI socket: %v", err)
-		ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 0, "unknown")
+		ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 0, "")
+		ch <- prometheus.MustNewConstMetric(c.sessionsTotal, prometheus.GaugeValue, 0)
 		return
 	}
 	defer session.Close()
 
-	// Get version info
 	versionMsg, err := session.CommandRequest("version", nil)
 	if err != nil {
 		log.Printf("Error getting version: %v", err)
-		ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 0, "unknown")
+		ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 0, "")
+		ch <- prometheus.MustNewConstMetric(c.sessionsTotal, prometheus.GaugeValue, 0)
 		return
 	}
 
-	version := "unknown"
-	if daemon, ok := versionMsg.Get("daemon").(string); ok {
-		if ver, ok := versionMsg.Get("version").(string); ok {
-			version = ver
-			ch <- prometheus.MustNewConstMetric(c.info, prometheus.CounterValue, 1, daemon, ver)
-		}
+	version := ""
+	daemon := "StrongSwan"
+	if d, ok := versionMsg.Get("daemon").(string); ok {
+		daemon = d
+	}
+	if ver, ok := versionMsg.Get("version").(string); ok {
+		version = ver
 	}
 
 	ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 1, version)
+	ch <- prometheus.MustNewConstMetric(c.info, prometheus.CounterValue, 1, daemon, version)
 
-	// Get active connections
 	sasMsg, err := session.StreamedCommandRequest("list-sas", "list-sa", nil)
 	if err != nil {
 		log.Printf("Error listing SAs: %v", err)
+		ch <- prometheus.MustNewConstMetric(c.sessionsTotal, prometheus.GaugeValue, 0)
 		return
 	}
 
@@ -105,23 +106,19 @@ func (c *StrongSwanCollector) Collect(ch chan<- prometheus.Metric) {
 		for _, sa := range msg.Keys() {
 			sessionCount++
 
-			// Extract connection details
 			saData, ok := msg.Get(sa).(map[string]interface{})
 			if !ok {
 				continue
 			}
 
-			// Get client identifier (use uniqueid or remote-id)
 			clientID := sa
 			if remoteID, ok := saData["remote-id"].(string); ok {
 				clientID = remoteID
 			}
 
-			// Extract byte counters from child SAs
 			if childSAs, ok := saData["child-sas"].(map[string]interface{}); ok {
 				for _, childData := range childSAs {
 					if child, ok := childData.(map[string]interface{}); ok {
-						// Bytes in
 						if bytesInStr, ok := child["bytes-in"].(string); ok {
 							if bytesIn, err := parseBytes(bytesInStr); err == nil {
 								ch <- prometheus.MustNewConstMetric(
@@ -133,7 +130,6 @@ func (c *StrongSwanCollector) Collect(ch chan<- prometheus.Metric) {
 							}
 						}
 
-						// Bytes out
 						if bytesOutStr, ok := child["bytes-out"].(string); ok {
 							if bytesOut, err := parseBytes(bytesOutStr); err == nil {
 								ch <- prometheus.MustNewConstMetric(

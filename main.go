@@ -24,17 +24,14 @@ func main() {
 
 	log.Printf("Starting StrongSwan Exporter version %s (built %s)", version, buildDate)
 
-	// Load configuration
 	config, err := loadConfig(*configFile)
 	if err != nil {
 		log.Fatalf("Error loading config: %v", err)
 	}
 
-	// Create and register the collector
 	collector := NewStrongSwanCollector(config)
 	prometheus.MustRegister(collector)
 
-	// Setup HTTP handlers
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprintf(w, `<!DOCTYPE html>
@@ -66,32 +63,26 @@ func main() {
 </html>`, version, buildDate, *metricsPath)
 	})
 
-	// Metrics endpoint
 	http.Handle(*metricsPath, promhttp.Handler())
 
-	// Sessions JSON API endpoint
 	http.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
 		sessions, err := getSessionsJSON(config)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Error getting sessions: %v", err), http.StatusInternalServerError)
-			return
+			log.Printf("Error getting sessions: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(sessions)
 	})
 
-	// Local sessions JSON API endpoint
 	http.HandleFunc("/sessions_local", func(w http.ResponseWriter, r *http.Request) {
 		sessions, err := getSessionsJSON(config)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Error getting sessions: %v", err), http.StatusInternalServerError)
-			return
+			log.Printf("Error getting sessions: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(sessions)
 	})
 
-	// Static HTML view
 	http.HandleFunc("/static", func(w http.ResponseWriter, r *http.Request) {
 		staticHTML, err := getStaticHTML(config)
 		if err != nil {
