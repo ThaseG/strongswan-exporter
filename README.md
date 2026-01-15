@@ -30,13 +30,13 @@ strongswan_bytes_in_total{client="user@example.com"} 3317
 strongswan_bytes_out_total{client="user@example.com"} 3616
 # HELP strongswan_info Software info
 # TYPE strongswan_info counter
-strongswan_info{product="charon",version="6.0.3"} 1
+strongswan_info{product="charon",version="6.0.4"} 1
 # HELP strongswan_sessions_total Total number of active sessions
 # TYPE strongswan_sessions_total gauge
 strongswan_sessions_total 1
 # HELP probe_success StrongSwan Status
 # TYPE probe_success gauge
-probe_success{version="6.0.3"} 1
+probe_success{version="6.0.4"} 1
 ```
 #### Internal Exporter Metrics
 ```
@@ -143,13 +143,13 @@ strongswan_bytes_in_total{client="user@example.com"} 2837
 strongswan_bytes_out_total{client="user@example.com"} 3112
 # HELP strongswan_info Software info
 # TYPE strongswan_info counter
-strongswan_info{product="charon",version="6.0.3"} 1
+strongswan_info{product="charon",version="6.0.4"} 1
 # HELP strongswan_sessions_total Total number of active sessions
 # TYPE strongswan_sessions_total gauge
 strongswan_sessions_total 1
 # HELP probe_success StrongSwan Status
 # TYPE probe_success gauge
-probe_success{version="6.0.3"} 1
+probe_success{version="6.0.4"} 1
 # HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
 # TYPE process_cpu_seconds_total counter
 process_cpu_seconds_total 0.02
@@ -328,11 +328,11 @@ scrape_configs:
 ```
 # HELP probe_success StrongSwan Status
 # TYPE probe_success gauge
-probe_success{version="6.0.3"} 1
+probe_success{version="6.0.4"} 1
 
 # HELP strongswan_info Software info
 # TYPE strongswan_info counter
-strongswan_info{product="charon",version="6.0.3"} 1
+strongswan_info{product="charon",version="6.0.4"} 1
 
 # HELP strongswan_sessions_total Total number of active sessions
 # TYPE strongswan_sessions_total gauge
