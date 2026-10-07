@@ -2,9 +2,11 @@
 
 Prometheus exporter for StrongSwan IPsec server metrics with JSON session API endpoint.
 
-## Example usage
+## Example usage and testing
 
-To see an example usage and e2e tests, please visit this [strongswan repository.](https://github.com/ThaseG/strongswan)
+All CI tests of this exporter are done in the [strongswan-container repository](https://github.com/ThaseG/strongswan-container). Its pipeline builds the StrongSwan server image with this exporter, scans it with Trivy, deploys the server together with Debian Bookworm, Debian Bullseye and Ubuntu Jammy clients, runs ping tests through the established IPsec tunnels and validates the data returned by the exporter. Visit it to see an example usage of this exporter.
+
+The CI in this repository only runs `golangci-lint` and a Trivy filesystem scan.
 
 ## Images
 
@@ -24,10 +26,10 @@ To see an example usage and e2e tests, please visit this [strongswan repository.
 
 # HELP strongswan_bytes_in_total Total number of bytes received
 # TYPE strongswan_bytes_in_total counter
-strongswan_bytes_in_total{client="user@example.com"} 3317
+strongswan_bytes_in_total{client="user@example.com_10.0.0.2/32_ikev2"} 3317
 # HELP strongswan_bytes_out_total Total number of bytes sent
 # TYPE strongswan_bytes_out_total counter
-strongswan_bytes_out_total{client="user@example.com"} 3616
+strongswan_bytes_out_total{client="user@example.com_10.0.0.2/32_ikev2"} 3616
 # HELP strongswan_info Software info
 # TYPE strongswan_info counter
 strongswan_info{product="charon",version="6.0.4"} 1
@@ -135,21 +137,6 @@ go_sched_gomaxprocs_threads 2
 # HELP go_threads Number of OS threads created.
 # TYPE go_threads gauge
 go_threads 4
-# HELP strongswan_bytes_in_total Total number of bytes received
-# TYPE strongswan_bytes_in_total counter
-strongswan_bytes_in_total{client="user@example.com"} 2837
-# HELP strongswan_bytes_out_total Total number of bytes sent
-# TYPE strongswan_bytes_out_total counter
-strongswan_bytes_out_total{client="user@example.com"} 3112
-# HELP strongswan_info Software info
-# TYPE strongswan_info counter
-strongswan_info{product="charon",version="6.0.4"} 1
-# HELP strongswan_sessions_total Total number of active sessions
-# TYPE strongswan_sessions_total gauge
-strongswan_sessions_total 1
-# HELP probe_success StrongSwan Status
-# TYPE probe_success gauge
-probe_success{version="6.0.4"} 1
 # HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
 # TYPE process_cpu_seconds_total counter
 process_cpu_seconds_total 0.02
@@ -190,15 +177,17 @@ promhttp_metric_handler_requests_total{code="503"} 0
 ```
 # http://<StrongSwan server IP>:9234/sessions_local
 
-[{"server":"strongswan-server","protocol":"ikev2","uniqueid":"con1[1]","state":"ESTABLISHED","remotehost":"78.99.236.15","remoteport":"4500","remoteid":"user@example.com","remotets":"10.0.0.2/32","localts":"0.0.0.0/0","established":"2025-11-03 20:40:03","bytesin":"3557","bytesout":"3868","packetsin":"0","packetsout":"0"}]
+[{"server":"strongswan-server","protocol":"ikev2","p1uniqueid":"1","p2uniqueid":"1","state":"ESTABLISHED","remotehost":"78.99.236.15","remoteport":"4500","remoteid":"user@example.com","remotets":"10.0.0.2/32","localts":"0.0.0.0/0","established":"2025-11-03 20:40:03","bytesin":"3557","bytesout":"3868","packetsin":"31","packetsout":"29"}]
 ```
 
 ## Features
 
 - **Prometheus Metrics**: Exposes StrongSwan IPsec session metrics in Prometheus format
-- **JSON API**: Provides detailed session information via `/sessions` endpoint
+- **JSON API**: Provides detailed session information via `/sessions_local` endpoint
 - **VICI Protocol**: Collects data directly from StrongSwan's VICI socket
-- **Real-time Data**: Query-based collection provides instant metrics
+- **Background Refresh**: Metrics are collected every `refresh_interval` seconds and served from cache, so scrapes never block on charon
+- **Separate Internal Metrics**: Go runtime and process metrics are exposed on `/prom`, keeping `/metrics` StrongSwan-only
+- **Same Design as OpenVPN Exporter**: Metric names, labels, JSON fields and web pages follow [openvpn-exporter](https://github.com/ThaseG/openvpn-exporter)
 
 ## Metrics Exposed
 
@@ -206,18 +195,25 @@ promhttp_metric_handler_requests_total{code="503"} 0
 
 - `probe_success` - StrongSwan status (1 = up, 0 = down) with version label
 - `strongswan_info` - Software information (product, version)
-- `strongswan_sessions_total` - Total number of active IPsec tunnels
-- `strongswan_bytes_in_total` - Bytes received per connection (labeled by client ID)
-- `strongswan_bytes_out_total` - Bytes sent per connection (labeled by client ID)
+- `strongswan_sessions_total` - Total number of active IKE SAs (IPsec tunnels)
+- `strongswan_bytes_in_total` - Bytes received per client
+- `strongswan_bytes_out_total` - Bytes sent per client
 
-### JSON API (`/sessions`)
+The `client` label has the format `<identity>_<remote traffic selector>_<protocol>`
+(e.g. `user@example.com_10.0.0.2/32_ikev2`), the same scheme as the OpenVPN exporter
+(`<CN>_<virtual IP>_<protocol>`). The identity is the EAP identity, falling back to the
+XAuth identity and then the IKE remote-id. Counters of Child SAs sharing a label
+(e.g. briefly during a rekey) are summed.
 
-Returns detailed session information including:
-- Server hostname
-- Protocol (IKEv1/IKEv2)
+### JSON API (`/sessions_local`)
+
+Returns one entry per Child SA including:
+- Server name (`server_name` from config)
+- Protocol (`ikev1`/`ikev2`)
+- IKE SA unique ID (`p1uniqueid`) and Child SA unique ID (`p2uniqueid`)
 - Client remote IP and port
-- Client identity (remote-id)
-- Traffic selectors (virtual IPs)
+- Client identity (EAP / XAuth identity or remote-id)
+- Traffic selectors (remote = virtual IP, local)
 - Connection state
 - Bytes/packets in/out
 - Session established time
@@ -267,6 +263,15 @@ Create an `exporter.yaml` file:
 ```yaml
 # Path to StrongSwan VICI socket
 vici_socket: "/var/run/charon.vici"
+
+# Server name to display in sessions
+server_name: strongswan-server
+
+# How often to query charon and refresh metrics (seconds, default: 15)
+refresh_interval: 15
+
+# Enable debug logging (default: false)
+debug: false
 ```
 
 ## Usage
@@ -297,18 +302,16 @@ vici_socket: "/var/run/charon.vici"
   
   --help, -h
       Show help
-  
-  --version
-      Show version information
 ```
 
 ## Endpoints
 
 - `/` - Landing page with links
-- `/metrics` - Prometheus metrics endpoint
-- `/sessions` - JSON API with detailed session information
-- `/sessions_local` - JSON API with local session information
+- `/metrics` - Prometheus metrics endpoint (StrongSwan metrics only)
+- `/prom` - Internal exporter metrics (Go runtime, process)
 - `/static` - HTML view of active connections
+- `/sessions_local` - JSON API with local session information
+- `/sessions` - Alias of `/sessions_local`, kept for backward compatibility
 
 ## Prometheus Configuration
 
@@ -340,13 +343,13 @@ strongswan_sessions_total 3
 
 # HELP strongswan_bytes_in_total Total number of bytes received
 # TYPE strongswan_bytes_in_total counter
-strongswan_bytes_in_total{client="user1@domain.com"} 1234567
-strongswan_bytes_in_total{client="user2@domain.com"} 9876543
+strongswan_bytes_in_total{client="user1@domain.com_10.10.1.2/32_ikev2"} 1234567
+strongswan_bytes_in_total{client="user2@domain.com_10.10.1.3/32_ikev2"} 9876543
 
 # HELP strongswan_bytes_out_total Total number of bytes sent
 # TYPE strongswan_bytes_out_total counter
-strongswan_bytes_out_total{client="user1@domain.com"} 7654321
-strongswan_bytes_out_total{client="user2@domain.com"} 3456789
+strongswan_bytes_out_total{client="user1@domain.com_10.10.1.2/32_ikev2"} 7654321
+strongswan_bytes_out_total{client="user2@domain.com_10.10.1.3/32_ikev2"} 3456789
 ```
 
 ### JSON Sessions API
@@ -356,7 +359,8 @@ strongswan_bytes_out_total{client="user2@domain.com"} 3456789
   {
     "server": "strongswan-server",
     "protocol": "ikev2",
-    "uniqueid": "con1[1]",
+    "p1uniqueid": "1",
+    "p2uniqueid": "1",
     "state": "ESTABLISHED",
     "remotehost": "203.0.113.45",
     "remoteport": "4500",
@@ -372,7 +376,8 @@ strongswan_bytes_out_total{client="user2@domain.com"} 3456789
   {
     "server": "strongswan-server",
     "protocol": "ikev2",
-    "uniqueid": "con2[2]",
+    "p1uniqueid": "2",
+    "p2uniqueid": "2",
     "state": "ESTABLISHED",
     "remotehost": "203.0.113.89",
     "remoteport": "4500",
@@ -392,7 +397,7 @@ strongswan_bytes_out_total{client="user2@domain.com"} 3456789
 
 1. **Socket Permissions**: Ensure the VICI socket has appropriate permissions
 2. **Firewall**: Restrict access to port 9234 to authorized hosts only
-3. **Sensitive Data**: The `/sessions` endpoint exposes client IPs and identities - consider authentication
+3. **Sensitive Data**: The `/sessions_local` and `/static` endpoints exposes client IPs and identities - consider authentication
 
 ## Troubleshooting
 
@@ -423,7 +428,7 @@ sudo chown root:strongswan /var/run/charon.vici
 ### Empty session list despite active connections
 
 - Verify connections are actually established: `swanctl --list-sas`
-- Check that connections are IKEv2 (IKEv1 may have limited VICI support)
+- Run with `debug: true` in `exporter.yaml` to log every collection cycle
 - Review StrongSwan logs: `journalctl -u strongswan -f`
 
 ## License

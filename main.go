@@ -3,9 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
+	"html"
 	"net/http"
+	"os"
 
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -13,88 +16,190 @@ import (
 var (
 	version   = "dev"
 	buildDate = "unknown"
-
-	listenAddress = flag.String("web.listen-address", ":9234", "Address to listen on for web interface and telemetry")
-	metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
-	configFile    = flag.String("config.file", "exporter.yaml", "Path to configuration file")
 )
 
 func main() {
+	var (
+		listenAddress = flag.String("web.listen-address", ":9234", "Address to listen on for web interface and telemetry")
+		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
+		configFile    = flag.String("config.file", "exporter.yaml", "Path to configuration file")
+	)
 	flag.Parse()
 
-	log.Printf("Starting StrongSwan Exporter version %s (built %s)", version, buildDate)
+	// Setup logger
+	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
+	logger = log.With(logger, "ts", log.DefaultTimestampUTC)
+	logger = log.With(logger, "caller", log.DefaultCaller)
 
-	config, err := loadConfig(*configFile)
+	_ = level.Info(logger).Log("msg", "Starting StrongSwan Exporter", "version", version, "build_date", buildDate)
+
+	// Load configuration
+	conf, err := loadConfig(*configFile)
 	if err != nil {
-		log.Fatalf("Error loading config: %v", err)
+		_ = level.Error(logger).Log("msg", "Error loading config", "err", err)
+		os.Exit(1)
 	}
 
-	collector := NewStrongSwanCollector(config)
-	prometheus.MustRegister(collector)
+	if conf.Debug {
+		_ = level.Info(logger).Log("msg", "Debug logging enabled")
+	}
 
+	// Create collector and start background refresh
+	collector := &StrongSwanCollector{
+		conf:   conf,
+		logger: logger,
+	}
+	collector.StartBackgroundRefresh()
+
+	// Register collector with a dedicated registry (StrongSwan metrics only)
+	swanRegistry := prometheus.NewRegistry()
+	swanRegistry.MustRegister(collector)
+
+	// Setup HTTP handlers
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprintf(w, `<!DOCTYPE html>
-<html>
-<head>
-	<title>StrongSwan Exporter</title>
-	<style>
-		body { font-family: Arial, sans-serif; margin: 40px; }
-		h1 { color: #333; }
-		.info { background: #f0f0f0; padding: 20px; border-radius: 5px; margin: 20px 0; }
-		a { color: #0066cc; text-decoration: none; }
-		a:hover { text-decoration: underline; }
-	</style>
-</head>
-<body>
-	<h1>StrongSwan Exporter</h1>
-	<div class="info">
-		<p><strong>Version:</strong> %s</p>
-		<p><strong>Build Date:</strong> %s</p>
-	</div>
-	<h2>Endpoints</h2>
-	<ul>
-		<li><a href="%s">Metrics</a> - Prometheus metrics endpoint</li>
-		<li><a href="/sessions">Sessions</a> - JSON API with connection details</li>
-		<li><a href="/sessions_local">Local Sessions</a> - JSON API with local connection details</li>
-		<li><a href="/static">Static Page</a> - HTML view of connections</li>
-	</ul>
-</body>
-</html>`, version, buildDate, *metricsPath)
+		indexHandler(w, r, *metricsPath)
 	})
 
-	http.Handle(*metricsPath, promhttp.Handler())
+	// /metrics - Only StrongSwan metrics (custom collector)
+	http.Handle(*metricsPath, promhttp.HandlerFor(swanRegistry, promhttp.HandlerOpts{}))
 
-	http.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
-		sessions, err := getSessionsJSON(config)
-		if err != nil {
-			log.Printf("Error getting sessions: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(sessions)
-	})
-
-	http.HandleFunc("/sessions_local", func(w http.ResponseWriter, r *http.Request) {
-		sessions, err := getSessionsJSON(config)
-		if err != nil {
-			log.Printf("Error getting sessions: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(sessions)
-	})
+	// /prom - Internal Go and process metrics (default registry)
+	http.Handle("/prom", promhttp.Handler())
 
 	http.HandleFunc("/static", func(w http.ResponseWriter, r *http.Request) {
-		staticHTML, err := getStaticHTML(config)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Error generating static page: %v", err), http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(staticHTML))
+		staticHandler(w, r, conf, logger)
 	})
 
-	log.Printf("Listening on %s", *listenAddress)
-	if err := http.ListenAndServe(*listenAddress, nil); err != nil {
-		log.Fatalf("Error starting HTTP server: %v", err)
+	sessions := func(w http.ResponseWriter, r *http.Request) {
+		sessionsHandler(w, r, conf, logger)
 	}
+	http.HandleFunc("/sessions_local", sessions)
+	// /sessions - kept for backward compatibility
+	http.HandleFunc("/sessions", sessions)
+
+	_ = level.Info(logger).Log("msg", "Listening on", "address", *listenAddress)
+	if err := http.ListenAndServe(*listenAddress, nil); err != nil {
+		_ = level.Error(logger).Log("msg", "Error starting HTTP server", "err", err)
+		os.Exit(1)
+	}
+}
+
+func indexHandler(w http.ResponseWriter, r *http.Request, metricsPath string) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+
+	page := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StrongSwan Exporter</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 50px;
+            max-width: 600px;
+            width: 100%%;
+        }
+        h1 {
+            color: #333;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        .subtitle {
+            color: #666;
+            text-align: center;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+        .links {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .link-item {
+            display: block;
+            padding: 18px 25px;
+            background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);
+            color: white;
+            text-decoration: none;
+            border-radius: 12px;
+            transition: all 0.3s ease;
+            font-weight: 500;
+            font-size: 1.1em;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+        .link-item:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+        .link-item:active {
+            transform: translateY(-1px);
+        }
+        .section-title {
+            color: #888;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-weight: 600;
+        }
+        .footer {
+            margin-top: 40px;
+            text-align: center;
+            color: #999;
+            font-size: 0.9em;
+        }
+        @media (max-width: 600px) {
+            .container {
+                padding: 30px 20px;
+            }
+            h1 {
+                font-size: 2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔒 StrongSwan Exporter</h1>
+        <p class="subtitle">Monitoring Dashboard</p>
+        <div class="links">
+            <div class="section-title">Metrics</div>
+            <a href="%s" class="link-item">📊 Exporter Metrics</a>
+            <a href="/prom" class="link-item">⚙️ Internal Exporter Metrics</a>
+            <div class="section-title">Clients & Sessions</div>
+            <a href="/static" class="link-item">👥 Local Clients</a>
+            <a href="/sessions_local" class="link-item">📋 Local Sessions JSON</a>
+        </div>
+        <div class="footer">
+            StrongSwan Exporter %s (built %s)
+        </div>
+    </div>
+</body>
+</html>`
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = fmt.Fprintf(w, page, html.EscapeString(metricsPath), html.EscapeString(version), html.EscapeString(buildDate))
 }

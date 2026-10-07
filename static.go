@@ -3,126 +3,207 @@ package main
 import (
 	"fmt"
 	"html"
+	"net/http"
+
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 )
 
-func getStaticHTML(config *Config) (string, error) {
-	sessions, err := getSessions(config)
-	if err != nil {
-		return "", err
+func staticHandler(w http.ResponseWriter, r *http.Request, conf *Config, logger log.Logger) {
+	if conf.Debug {
+		_ = level.Debug(logger).Log("task", "Generating static HTML page")
 	}
 
-	htmlContent := `<!DOCTYPE html>
-<html>
+	state, err := getStrongSwanState(conf)
+	if err != nil {
+		_ = level.Error(logger).Log("task", "static page", "msg", err.Error())
+		w.WriteHeader(500)
+		fmt.Fprintf(w, "Error: %s", html.EscapeString(err.Error()))
+		return
+	}
+	sessions := state.sessions
+
+	page := `<!DOCTYPE html>
+<html lang="en">
 <head>
-	<title>StrongSwan Active Sessions</title>
-	<style>
-		body {
-			font-family: Arial, sans-serif;
-			margin: 20px;
-			background-color: #f5f5f5;
-		}
-		h1 {
-			color: #333;
-		}
-		table {
-			width: 100%;
-			border-collapse: collapse;
-			background-color: white;
-			box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-		}
-		th {
-			background-color: #4CAF50;
-			color: white;
-			padding: 12px;
-			text-align: left;
-			font-weight: bold;
-		}
-		td {
-			padding: 10px;
-			border-bottom: 1px solid #ddd;
-		}
-		tr:hover {
-			background-color: #f5f5f5;
-		}
-		.no-sessions {
-			padding: 20px;
-			text-align: center;
-			color: #666;
-		}
-		.stats {
-			margin: 20px 0;
-			padding: 15px;
-			background-color: white;
-			border-radius: 5px;
-			box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-		}
-	</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StrongSwan Local Clients</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 40px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #333;
+            font-size: 2.5em;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 20px;
+            color: #667eea;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .back-link:hover {
+            text-decoration: underline;
+        }
+        .table-wrap {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+        }
+        td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #eee;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 500;
+        }
+        .badge-ikev2 {
+            background-color: #e3f2fd;
+            color: #1976d2;
+        }
+        .badge-ikev1 {
+            background-color: #f3e5f5;
+            color: #7b1fa2;
+        }
+        .badge-established {
+            background-color: #e8f5e9;
+            color: #388e3c;
+        }
+        .badge-other {
+            background-color: #fff3e0;
+            color: #ef6c00;
+        }
+        .no-data {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+            font-size: 1.1em;
+        }
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px;
+            }
+            h1 {
+                font-size: 1.8em;
+            }
+            table {
+                font-size: 0.9em;
+            }
+        }
+    </style>
 </head>
 <body>
-	<h1>StrongSwan Active Sessions</h1>
-	<div class="stats">
-		<strong>Total Sessions:</strong> ` + fmt.Sprintf("%d", len(sessions)) + `
-	</div>
-`
+    <div class="container">
+        <a href="/" class="back-link">← Back to Dashboard</a>
+        <h1>🔒 Active StrongSwan Clients</h1>`
 
 	if len(sessions) == 0 {
-		htmlContent += `<div class="no-sessions">No active sessions</div>`
+		page += `
+        <div class="no-data">No active connections</div>`
 	} else {
-		htmlContent += `<table>
-		<thead>
-			<tr>
-				<th>Server</th>
-				<th>Protocol</th>
-				<th>State</th>
-				<th>Remote Host</th>
-				<th>Remote Port</th>
-				<th>Remote ID</th>
-				<th>Remote TS</th>
-				<th>Local TS</th>
-				<th>Established</th>
-				<th>Bytes In</th>
-				<th>Bytes Out</th>
-			</tr>
-		</thead>
-		<tbody>
-`
+		page += `
+        <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Client ID</th>
+                    <th>Remote Host</th>
+                    <th>Virtual IP</th>
+                    <th>Local TS</th>
+                    <th>Protocol</th>
+                    <th>State</th>
+                    <th>Bytes In</th>
+                    <th>Bytes Out</th>
+                    <th>Connected Since</th>
+                </tr>
+            </thead>
+            <tbody>`
 
-		for _, session := range sessions {
-			htmlContent += fmt.Sprintf(`			<tr>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-				<td>%s</td>
-			</tr>
-`,
-				html.EscapeString(session.Server),
-				html.EscapeString(session.Protocol),
-				html.EscapeString(session.State),
-				html.EscapeString(session.RemoteHost),
-				html.EscapeString(session.RemotePort),
-				html.EscapeString(session.RemoteID),
-				html.EscapeString(session.RemoteTS),
-				html.EscapeString(session.LocalTS),
-				html.EscapeString(session.Established),
-				html.EscapeString(session.BytesIn),
-				html.EscapeString(session.BytesOut),
+		for _, sess := range sessions {
+			protocolClass := "badge-ikev2"
+			if sess.Protocol == "ikev1" {
+				protocolClass = "badge-ikev1"
+			}
+			stateClass := "badge-other"
+			if sess.State == "ESTABLISHED" {
+				stateClass = "badge-established"
+			}
+
+			page += fmt.Sprintf(`
+                <tr>
+                    <td>%s</td>
+                    <td>%s:%s</td>
+                    <td>%s</td>
+                    <td>%s</td>
+                    <td><span class="badge %s">%s</span></td>
+                    <td><span class="badge %s">%s</span></td>
+                    <td>%s</td>
+                    <td>%s</td>
+                    <td>%s</td>
+                </tr>`,
+				html.EscapeString(sess.RemoteID),
+				html.EscapeString(sess.RemoteHost),
+				html.EscapeString(sess.RemotePort),
+				html.EscapeString(sess.RemoteTs),
+				html.EscapeString(sess.LocalTs),
+				protocolClass,
+				html.EscapeString(sess.Protocol),
+				stateClass,
+				html.EscapeString(sess.State),
+				html.EscapeString(sess.BytesIn),
+				html.EscapeString(sess.BytesOut),
+				html.EscapeString(sess.Established),
 			)
 		}
 
-		htmlContent += `		</tbody>
-	</table>
-`
+		page += `
+            </tbody>
+        </table>
+        </div>`
 	}
 
-	htmlContent += `</body>
+	page += `
+    </div>
+</body>
 </html>`
 
-	return htmlContent, nil
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(page))
 }

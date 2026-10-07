@@ -7,8 +7,12 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// Config holds the exporter configuration loaded from exporter.yaml
 type Config struct {
-	ViciSocket string `yaml:"vici_socket"`
+	ViciSocket      string `yaml:"vici_socket"`      // path to charon VICI socket
+	ServerName      string `yaml:"server_name"`      // server name shown in sessions
+	Debug           bool   `yaml:"debug"`            // true/false, default false
+	RefreshInterval int    `yaml:"refresh_interval"` // in seconds, default 15
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -22,9 +26,15 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Set default if not specified
+	// Set defaults if not specified
 	if config.ViciSocket == "" {
 		config.ViciSocket = "/var/run/charon.vici"
+	}
+	if config.ServerName == "" {
+		config.ServerName = "strongswan-server"
+	}
+	if config.RefreshInterval <= 0 {
+		config.RefreshInterval = 15
 	}
 
 	return &config, nil

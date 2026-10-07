@@ -1,3 +1,14 @@
 # StrongSwan Exporter Configuration
+
 # Path to StrongSwan VICI socket
 vici_socket: "/var/run/charon.vici"
+
+# Server name to display in sessions
+server_name: strongswan-server
+
+# How often to query charon and refresh metrics (seconds, default: 15)
+refresh_interval: 15
+
+# Enable debug logging (default: false)
+# When false, collection cycle log messages are suppressed
+debug: false

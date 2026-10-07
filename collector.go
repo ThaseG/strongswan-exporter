@@ -1,156 +1,150 @@
 package main
 
 import (
-	"fmt"
-	"log"
+	"strconv"
+	"sync"
+	"time"
 
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/strongswan/govici/vici"
 )
 
 type StrongSwanCollector struct {
-	config *Config
+	conf   *Config
+	logger log.Logger
 
-	up            *prometheus.Desc
-	info          *prometheus.Desc
-	sessionsTotal *prometheus.Desc
-	bytesIn       *prometheus.Desc
-	bytesOut      *prometheus.Desc
+	// Background refresh cache
+	mu          sync.RWMutex
+	cachedState *collectedState
 }
 
-func NewStrongSwanCollector(config *Config) *StrongSwanCollector {
-	return &StrongSwanCollector{
-		config: config,
-		up: prometheus.NewDesc(
-			"probe_success",
-			"StrongSwan Status",
-			[]string{"version"},
-			nil,
-		),
-		info: prometheus.NewDesc(
-			"strongswan_info",
-			"Software info",
-			[]string{"product", "version"},
-			nil,
-		),
-		sessionsTotal: prometheus.NewDesc(
-			"strongswan_sessions_total",
-			"Total number of active sessions",
-			nil,
-			nil,
-		),
-		bytesIn: prometheus.NewDesc(
-			"strongswan_bytes_in_total",
-			"Total number of bytes received",
-			[]string{"client"},
-			nil,
-		),
-		bytesOut: prometheus.NewDesc(
-			"strongswan_bytes_out_total",
-			"Total number of bytes sent",
-			[]string{"client"},
-			nil,
-		),
-	}
+// collectedState holds the last collected snapshot
+type collectedState struct {
+	sessions []SessionExport
+	ikeSAs   int
+	product  string
+	version  string // used for probe_success label
+	success  float64
 }
 
+var (
+	swanInfo          = prometheus.NewDesc("strongswan_info", "Software info", []string{"product", "version"}, nil)
+	swanSessTotal     = prometheus.NewDesc("strongswan_sessions_total", "Total number of active sessions", nil, nil)
+	swanBytesInTotal  = prometheus.NewDesc("strongswan_bytes_in_total", "Total number of bytes received", []string{"client"}, nil)
+	swanBytesOutTotal = prometheus.NewDesc("strongswan_bytes_out_total", "Total number of bytes sent", []string{"client"}, nil)
+	swanProbeSuccess  = prometheus.NewDesc("probe_success", "StrongSwan Status", []string{"version"}, nil)
+)
+
+// Implement prometheus.Collector Describe method
 func (c *StrongSwanCollector) Describe(ch chan<- *prometheus.Desc) {
-	ch <- c.up
-	ch <- c.info
-	ch <- c.sessionsTotal
-	ch <- c.bytesIn
-	ch <- c.bytesOut
+	ch <- swanProbeSuccess
+	ch <- swanInfo
+	ch <- swanSessTotal
+	ch <- swanBytesInTotal
+	ch <- swanBytesOutTotal
 }
 
+// Implement prometheus.Collector Collect method — serves from cache
 func (c *StrongSwanCollector) Collect(ch chan<- prometheus.Metric) {
-	session, err := vici.NewSession()
-	if err != nil {
-		log.Printf("Error connecting to StrongSwan VICI socket: %v", err)
-		ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 0, "")
-		ch <- prometheus.MustNewConstMetric(c.sessionsTotal, prometheus.GaugeValue, 0)
-		return
-	}
-	defer session.Close()
+	c.mu.RLock()
+	state := c.cachedState
+	c.mu.RUnlock()
 
-	versionMsg, err := session.CommandRequest("version", nil)
-	if err != nil {
-		log.Printf("Error getting version: %v", err)
-		ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 0, "")
-		ch <- prometheus.MustNewConstMetric(c.sessionsTotal, prometheus.GaugeValue, 0)
+	if state == nil || state.success == 0 {
+		// No data yet or charon unreachable — emit a failing probe and zeros
+		ch <- prometheus.MustNewConstMetric(swanProbeSuccess, prometheus.GaugeValue, 0, "")
+		ch <- prometheus.MustNewConstMetric(swanSessTotal, prometheus.GaugeValue, 0)
 		return
 	}
 
-	version := ""
-	daemon := "StrongSwan"
-	if d, ok := versionMsg.Get("daemon").(string); ok {
-		daemon = d
-	}
-	if ver, ok := versionMsg.Get("version").(string); ok {
-		version = ver
-	}
+	ch <- prometheus.MustNewConstMetric(swanProbeSuccess, prometheus.GaugeValue, state.success, state.version)
+	ch <- prometheus.MustNewConstMetric(swanInfo, prometheus.CounterValue, 1, state.product, state.version)
+	ch <- prometheus.MustNewConstMetric(swanSessTotal, prometheus.GaugeValue, float64(state.ikeSAs))
 
-	ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 1, version)
-	ch <- prometheus.MustNewConstMetric(c.info, prometheus.CounterValue, 1, daemon, version)
-
-	sasMsg, err := session.StreamedCommandRequest("list-sas", "list-sa", nil)
-	if err != nil {
-		log.Printf("Error listing SAs: %v", err)
-		ch <- prometheus.MustNewConstMetric(c.sessionsTotal, prometheus.GaugeValue, 0)
-		return
-	}
-
-	sessionCount := 0
-	messages := sasMsg.Messages()
-	
-	for _, msg := range messages {
-		for _, sa := range msg.Keys() {
-			sessionCount++
-
-			saData, ok := msg.Get(sa).(map[string]interface{})
-			if !ok {
-				continue
-			}
-
-			clientID := sa
-			if remoteID, ok := saData["remote-id"].(string); ok {
-				clientID = remoteID
-			}
-
-			if childSAs, ok := saData["child-sas"].(map[string]interface{}); ok {
-				for _, childData := range childSAs {
-					if child, ok := childData.(map[string]interface{}); ok {
-						if bytesInStr, ok := child["bytes-in"].(string); ok {
-							if bytesIn, err := parseBytes(bytesInStr); err == nil {
-								ch <- prometheus.MustNewConstMetric(
-									c.bytesIn,
-									prometheus.CounterValue,
-									float64(bytesIn),
-									clientID,
-								)
-							}
-						}
-
-						if bytesOutStr, ok := child["bytes-out"].(string); ok {
-							if bytesOut, err := parseBytes(bytesOutStr); err == nil {
-								ch <- prometheus.MustNewConstMetric(
-									c.bytesOut,
-									prometheus.CounterValue,
-									float64(bytesOut),
-									clientID,
-								)
-							}
-						}
-					}
-				}
-			}
+	// Label uniquely identifies each session:
+	// remote identity + remote traffic selector (virtual IP) + protocol.
+	// During a rekey two Child SAs briefly share the same selector, so the
+	// counters are summed per label to avoid duplicate series.
+	bytesIn := make(map[string]float64)
+	bytesOut := make(map[string]float64)
+	var order []string
+	for _, v := range state.sessions {
+		clientLabel := v.RemoteID + "_" + v.RemoteTs + "_" + v.Protocol
+		if _, ok := bytesIn[clientLabel]; !ok {
+			order = append(order, clientLabel)
+			bytesIn[clientLabel] = 0
+			bytesOut[clientLabel] = 0
+		}
+		if bi, err := strconv.ParseFloat(v.BytesIn, 64); err == nil {
+			bytesIn[clientLabel] += bi
+		}
+		if bo, err := strconv.ParseFloat(v.BytesOut, 64); err == nil {
+			bytesOut[clientLabel] += bo
 		}
 	}
 
-	ch <- prometheus.MustNewConstMetric(c.sessionsTotal, prometheus.GaugeValue, float64(sessionCount))
+	for _, clientLabel := range order {
+		ch <- prometheus.MustNewConstMetric(swanBytesInTotal, prometheus.CounterValue, bytesIn[clientLabel], clientLabel)
+		ch <- prometheus.MustNewConstMetric(swanBytesOutTotal, prometheus.CounterValue, bytesOut[clientLabel], clientLabel)
+	}
 }
 
-func parseBytes(s string) (uint64, error) {
-	var bytes uint64
-	_, err := fmt.Sscanf(s, "%d", &bytes)
-	return bytes, err
+// StartBackgroundRefresh launches the collection ticker at the configured interval.
+// Interval is read from refresh_interval in exporter.yaml (seconds); defaults to 15.
+// Call this once after creating the collector (before registering with Prometheus).
+func (c *StrongSwanCollector) StartBackgroundRefresh() {
+	interval := c.conf.RefreshInterval
+	if interval <= 0 {
+		interval = 15
+	}
+
+	_ = level.Info(c.logger).Log("msg", "Starting background refresh", "interval_seconds", interval)
+
+	// Collect immediately on start so the first scrape is never empty
+	c.collect()
+
+	go func() {
+		ticker := time.NewTicker(time.Duration(interval) * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			c.collect()
+		}
+	}()
+}
+
+// collect does the actual work and stores the result in the cache
+func (c *StrongSwanCollector) collect() {
+	c.debugLog("task", "Collecting StrongSwan metrics", "target", c.conf.ViciSocket)
+
+	newState := &collectedState{}
+
+	state, err := getStrongSwanState(c.conf)
+	if err != nil {
+		_ = level.Error(c.logger).Log("task", "Collecting StrongSwan metrics", "status", "ERROR", "msg", err)
+	}
+	// state is non-nil when charon answered the version request, even if
+	// listing SAs failed afterwards
+	if state != nil {
+		newState.product = state.product
+		newState.version = state.version
+		newState.success = 1
+		if err == nil {
+			newState.sessions = state.sessions
+			newState.ikeSAs = state.ikeSAs
+		}
+	}
+
+	c.debugLog("task", "Collection complete", "ike_sas", newState.ikeSAs, "child_sas", len(newState.sessions), "version", newState.version)
+
+	c.mu.Lock()
+	c.cachedState = newState
+	c.mu.Unlock()
+}
+
+// debugLog emits a debug-level log only when debug is enabled in config
+func (c *StrongSwanCollector) debugLog(keyvals ...interface{}) {
+	if c.conf.Debug {
+		_ = level.Debug(c.logger).Log(keyvals...)
+	}
 }
